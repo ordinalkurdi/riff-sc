@@ -17,6 +17,7 @@ const {
   refreshAccessToken
 } = require('./google-oauth');
 const { fetchYouTubeLibrary } = require('./youtube-data');
+const scOauth = require('./soundcloud-oauth');
 const RFACC_KEY = crypto.createHash('sha256').update('riff-account-key-v1').digest();
 const APP_ID = 'io.github.rootscripts.riff';
 const IS_MAC = process.platform === 'darwin';
@@ -2133,6 +2134,212 @@ function runGUI() {
         }
         return { success: true, warning };
       });
+
+      // ───────────── SoundCloud account (OAuth 2.1 + PKCE) ─────────────
+      const SC_OAUTH_FILE = path.join(DATA_DIR, 'soundcloud-oauth.enc');
+
+      function readScAuth() {
+        if (!fs.existsSync(SC_OAUTH_FILE)) return null;
+        if (!safeStorage.isEncryptionAvailable()) throw new Error('Secure storage is unavailable on this system');
+        return JSON.parse(safeStorage.decryptString(fs.readFileSync(SC_OAUTH_FILE)));
+      }
+
+      function writeScAuth(data) {
+        if (!safeStorage.isEncryptionAvailable()) throw new Error('Secure storage is unavailable on this system');
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+        fs.writeFileSync(SC_OAUTH_FILE, safeStorage.encryptString(JSON.stringify(data)));
+      }
+
+      async function getScAccessToken() {
+        const auth = readScAuth();
+        if (!auth || !auth.refreshToken) throw new Error('Connect your SoundCloud account first');
+        if (auth.accessToken && auth.expiresAt > Date.now() + 60000) return auth.accessToken;
+        // Refresh tokens are single-use, so persist the new one immediately.
+        const refreshed = await scOauth.refreshAccessToken({
+          clientId: auth.clientId,
+          clientSecret: auth.clientSecret,
+          refreshToken: auth.refreshToken
+        });
+        auth.accessToken = refreshed.access_token;
+        auth.expiresAt = Date.now() + (Number(refreshed.expires_in) || 3600) * 1000;
+        if (refreshed.refresh_token) auth.refreshToken = refreshed.refresh_token;
+        writeScAuth(auth);
+        return auth.accessToken;
+      }
+
+      async function startScOAuthLogin(clientId, clientSecret) {
+        if (!safeStorage.isEncryptionAvailable()) throw new Error('Secure storage is unavailable on this system');
+        const codeVerifier = scOauth.createCodeVerifier();
+        const state = scOauth.createOAuthState();
+        const server = http.createServer();
+        await new Promise((resolve, reject) => {
+          server.once('error', (err) => reject(err && err.code === 'EADDRINUSE'
+            ? new Error(`Port ${scOauth.REDIRECT_PORT} is in use. Close the other app using it and try again.`)
+            : err));
+          server.listen(scOauth.REDIRECT_PORT, '127.0.0.1', resolve);
+        });
+        const authUrl = scOauth.createAuthorizationUrl({
+          clientId,
+          state,
+          codeChallenge: scOauth.createCodeChallenge(codeVerifier)
+        });
+        let cancelCallback;
+        try {
+          const callback = new Promise((resolve, reject) => {
+            let settled = false;
+            const timeout = setTimeout(() => {
+              finish(new Error('SoundCloud sign-in timed out. Complete the authorization in your browser and try again.'));
+            }, 180000);
+            const finish = (error, value) => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timeout);
+              server.removeListener('request', onRequest);
+              if (error) reject(error); else resolve(value);
+            };
+            cancelCallback = () => finish(new Error('SoundCloud sign-in could not be completed'));
+            const onRequest = (req, res) => {
+              const isLoopback = req.socket.remoteAddress === '127.0.0.1' ||
+                req.socket.remoteAddress === '::ffff:127.0.0.1';
+              if (!isLoopback) { res.writeHead(403); res.end(); return; }
+              const requestUrl = new URL(req.url || '/', scOauth.REDIRECT_URI);
+              if (req.method !== 'GET' || requestUrl.pathname !== '/callback') { res.writeHead(404); res.end(); return; }
+              const returnedState = requestUrl.searchParams.get('state') || '';
+              const expected = Buffer.from(state);
+              const actual = Buffer.from(returnedState);
+              if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
+                res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+                res.end('Authorization could not be verified. Return to Riff and try again.');
+                finish(new Error('SoundCloud authorization state did not match'));
+                return;
+              }
+              const providerError = requestUrl.searchParams.get('error');
+              if (providerError) {
+                res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+                res.end('<!doctype html><title>Riff</title><p>SoundCloud sign-in was cancelled. You can close this tab and return to Riff.</p>');
+                finish(new Error(providerError === 'access_denied' ? 'SoundCloud sign-in was cancelled' : `SoundCloud authorization failed: ${providerError}`));
+                return;
+              }
+              const code = requestUrl.searchParams.get('code');
+              if (!code) {
+                res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+                res.end('SoundCloud did not return an authorization code. Return to Riff and try again.');
+                finish(new Error('SoundCloud did not return an authorization code'));
+                return;
+              }
+              res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+              res.end('<!doctype html><title>Riff</title><p>SoundCloud account connected. You can close this tab and return to Riff.</p>');
+              finish(null, { code });
+            };
+            server.on('request', onRequest);
+          });
+          await shell.openExternal(authUrl);
+          const result = await callback;
+          const tokens = await scOauth.exchangeAuthorizationCode({
+            clientId, clientSecret, code: result.code, codeVerifier
+          });
+          if (!tokens.refresh_token) throw new Error('SoundCloud did not provide a refresh token');
+          const auth = {
+            clientId,
+            clientSecret,
+            accessToken: tokens.access_token,
+            refreshToken: tokens.refresh_token,
+            expiresAt: Date.now() + (Number(tokens.expires_in) || 3600) * 1000,
+            user: null
+          };
+          writeScAuth(auth);
+          try {
+            const me = await scOauth.getMe(tokens.access_token);
+            if (me.ok && me.data) {
+              auth.user = {
+                name: me.data.username || me.data.full_name || '',
+                avatar: me.data.avatar_url || '',
+                url: me.data.permalink_url || ''
+              };
+              writeScAuth(auth);
+            }
+          } catch (_) {}
+        } finally {
+          if (cancelCallback) cancelCallback();
+          if (server.listening) await new Promise(resolve => server.close(resolve));
+        }
+      }
+
+      ipcMain.handle('soundcloud-auth-status', async () => {
+        try {
+          const auth = readScAuth();
+          return {
+            hasCredentials: !!(auth && auth.clientId && auth.clientSecret),
+            loggedIn: !!(auth && auth.refreshToken),
+            clientId: auth && auth.clientId ? auth.clientId : '',
+            redirectUri: scOauth.REDIRECT_URI,
+            user: auth && auth.user ? auth.user : null
+          };
+        } catch (e) {
+          return { hasCredentials: false, loggedIn: false, redirectUri: scOauth.REDIRECT_URI, error: e.message };
+        }
+      });
+
+      ipcMain.handle('soundcloud-login', async (event, creds) => {
+        try {
+          const existing = (() => { try { return readScAuth(); } catch (_) { return null; } })();
+          const clientId = String((creds && creds.clientId) || (existing && existing.clientId) || '').trim();
+          const clientSecret = String((creds && creds.clientSecret) || (existing && existing.clientSecret) || '').trim();
+          if (!clientId || !clientSecret) {
+            return { success: false, error: 'Enter your SoundCloud app Client ID and Client Secret first.' };
+          }
+          await startScOAuthLogin(clientId, clientSecret);
+          return { success: true };
+        } catch (e) {
+          return { success: false, error: e && e.message ? e.message : 'SoundCloud sign-in failed' };
+        }
+      });
+
+      ipcMain.handle('soundcloud-logout', async () => {
+        let warning = '';
+        try {
+          const auth = readScAuth();
+          if (auth && auth.accessToken) {
+            try {
+              const token = await getScAccessToken();
+              await scOauth.disconnect(token);
+            } catch (_) {
+              warning = 'Signed out locally, but SoundCloud could not confirm token revocation.';
+            }
+          }
+          if (fs.existsSync(SC_OAUTH_FILE)) fs.unlinkSync(SC_OAUTH_FILE);
+          return { success: true, warning };
+        } catch (e) {
+          return { success: false, error: e && e.message ? e.message : 'Logout failed' };
+        }
+      });
+
+      // Like / unlike a track on the user's SoundCloud account.
+      ipcMain.handle('soundcloud-set-like', async (event, payload) => {
+        try {
+          const auth = readScAuth();
+          if (!auth || !auth.refreshToken) return { success: false, skipped: true, error: 'not connected' };
+          const token = await getScAccessToken();
+          const track = payload && payload.track;
+          const trackId = await scOauth.resolveTrackId(token, track);
+          if (!trackId) return { success: false, skipped: true, error: 'not a SoundCloud track' };
+          return await scOauth.setTrackLiked(token, trackId, !!(payload && payload.liked));
+        } catch (e) {
+          return { success: false, error: e && e.message ? e.message : 'SoundCloud like failed' };
+        }
+      });
+
+      // Pull every liked track from the user's SoundCloud account.
+      ipcMain.handle('soundcloud-fetch-likes', async () => {
+        try {
+          const token = await getScAccessToken();
+          const tracks = await scOauth.fetchAllLikedTracks(token);
+          return { success: true, tracks };
+        } catch (e) {
+          return { success: false, error: e && e.message ? e.message : 'Could not load SoundCloud likes' };
+        }
+      });
+      // ───────────── end SoundCloud account ─────────────
 
       ipcMain.handle('google-login', async () => {
         return await openYoutubeSignInWindow(true);

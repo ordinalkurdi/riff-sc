@@ -1106,6 +1106,7 @@ window.HomeCache = HomeCache;
     localStorage.setItem('devsize_favorites', JSON.stringify(state.favorites));
     updateFavoritesBadge();
     updateFavoriteIcon();
+    try { if (typeof window.scSyncLike === 'function') window.scSyncLike(track, !exists); } catch (_) {}
     updateRpSaveButton();
     if (state.currentView === 'favorites') {
       if (exists) {

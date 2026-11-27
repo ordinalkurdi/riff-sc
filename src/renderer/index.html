@@ -2622,6 +2622,31 @@ body:not(.home-next-to-search) .bs-home-circle { display: none !important; }
               </div>
             </div>
 
+            <div class="setting-item" id="card-sc-account">
+              <div class="setting-item-top" style="align-items: center; justify-content: space-between;">
+                <div style="display: flex; align-items: center; gap: 12px;">
+                  <img class="brand-icon-img" src="https://cdn.simpleicons.org/soundcloud/FF5500" alt="SoundCloud" width="24" height="24" />
+                  <div style="display:flex; flex-direction:column;">
+                    <span class="setting-name" data-i18n-fixed>SoundCloud account</span>
+                    <span class="setting-hint" id="sc-account-status" data-i18n-fixed>Not connected</span>
+                  </div>
+                </div>
+                <div style="display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end;">
+                  <button class="btn-pill-primary" id="btn-sc-login" type="button">Connect</button>
+                  <button class="btn-pill-primary hidden" id="btn-sc-sync" type="button">Sync likes</button>
+                  <button class="btn-pill-primary hidden" id="btn-sc-logout" type="button">Disconnect</button>
+                </div>
+              </div>
+              <div id="sc-account-creds" style="display:flex; flex-direction:column; gap:8px; margin-top:12px;">
+                <input type="text" id="sc-client-id" class="pill-text-input" placeholder="SoundCloud app Client ID" autocomplete="off" spellcheck="false" data-i18n-fixed>
+                <input type="password" id="sc-client-secret" class="pill-text-input" placeholder="SoundCloud app Client Secret" autocomplete="off" spellcheck="false" data-i18n-fixed>
+                <span class="setting-hint" data-i18n-fixed>Register an app at developers.soundcloud.com and add this exact Redirect URI: <code id="sc-redirect-uri">http://127.0.0.1:53682/callback</code></span>
+              </div>
+              <div class="setting-item-top" id="sc-two-way-row" style="align-items:center; justify-content:space-between; margin-top:12px;">
+                <span class="setting-hint" data-i18n-fixed>Hearting a SoundCloud song in Riff also likes it on SoundCloud (and un-hearting removes the like)</span>
+              </div>
+            </div>
+
             <div class="setting-item" id="card-apple-import">
               <div class="setting-item-top" style="align-items: center; justify-content: space-between;">
                 <div style="display: flex; align-items: center; gap: 12px;">
@@ -4970,6 +4995,7 @@ body:not(.home-next-to-search) .bs-home-circle { display: none !important; }
   <script src="modules/lyrics.js"></script>
   <script src="modules/library.js"></script>
   <script src="modules/import.js"></script>
+  <script src="modules/soundcloud-account.js"></script>
   <script src="modules/artist.js"></script>
   <script src="modules/ui.js"></script>
   <script src="app.js"></script>
